@@ -1,0 +1,6 @@
+[submodule "Isaac-GR00T"]
+	path = Isaac-GR00T
+	url = https://github.com/harry18456/Isaac-GR00T.git
+[submodule "SO-ARM100"]
+	path = SO-ARM100
+	url = https://github.com/harry18456/SO-ARM100.git
