@@ -4,3 +4,6 @@
 [submodule "SO-ARM100"]
 	path = SO-ARM100
 	url = https://github.com/harry18456/SO-ARM100.git
+[submodule "CH341SER"]
+	path = CH341SER
+	url = https://github.com/juliagoda/CH341SER.git
