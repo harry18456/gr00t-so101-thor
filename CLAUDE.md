@@ -87,6 +87,21 @@ This is the most important non-obvious architecture detail:
 - `--modality_config_path` in `run_gr00t_server.py` is **only** used for `ReplayPolicy` (when `--dataset_path` is given). It is NOT passed to `Gr00tPolicy`. The modality config comes from the checkpoint's `processor_config.json` instead.
 - Server-client communicate via ZMQ on port 5555.
 
+### lerobot Installation (critical — easy to break the environment)
+
+`eval_so100.py` requires `lerobot` (0.4.1) and `draccus`, but they are NOT in the GR00T pyproject.toml. They have their own pyproject.toml at `gr00t/eval/real_robot/SO100/pyproject.toml`.
+
+**NEVER install lerobot with dependencies** — `uv pip install lerobot` will pull PyTorch 2.7.1+cpu from PyPI, overwriting the Jetson-specific 2.10.0+CUDA. It also replaces the source-built torchcodec with a prebuilt version that lacks FFmpeg 7 support.
+
+Correct install:
+```bash
+uv pip install --no-deps "lerobot @ git+https://github.com/huggingface/lerobot.git@c75455a6de5c818fa1bb69fb2d92423e86c70475"
+uv pip install --no-deps draccus
+uv pip install mergedeep pyyaml-include typing-inspect pyserial deepdiff orderly-set
+```
+
+If the environment is already broken, see README Section 9.1 for full recovery steps (uv sync → rebuild torchcodec from source → reinstall lerobot with --no-deps).
+
 ### Other Notes
 
 - **N1.6 vs N1.5**: Fine-tune script is `gr00t/experiment/launch_finetune.py` (NOT `scripts/gr00t_finetune.py`). For N1.5, checkout `n1.5-release` branch.
@@ -98,3 +113,4 @@ This is the most important non-obvious architecture detail:
 - **PEP 668**: Thor's Ubuntu 24.04 blocks `sudo pip3`. Use `uv tool install` for system-wide tools (e.g., `jetson-stats`).
 - **CH34x driver**: Must `make && sudo make load` in `CH341SER/` after each reboot (or add to `/etc/modules-load.d/`).
 - **N1.6 overfits faster**: Use `--color_jitter_params` and `--weight_decay` to regularize.
+- **torchcodec**: Must be built from source against system FFmpeg 7. The prebuilt wheel from PyPI/Jetson AI Lab doesn't work. `install_deps.sh` handles this.

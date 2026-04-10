@@ -49,6 +49,8 @@ Seeed Studio wiki 教學原本使用 GR00T N1.5，但 Isaac-GR00T `main` branch 
 | wandb | 已安裝（0.23.0）|
 | so100_config.py | ✓ 已確認符合 SO-101（2 cam、6 joints + gripper、16 步 action horizon）|
 | CH34x 驅動 | 已安裝（CH341SER submodule，kernel module 已載入）|
+| lerobot（eval 用）| 已安裝（0.4.1，`--no-deps` 安裝以避免覆蓋 PyTorch）|
+| draccus / pyserial | 已安裝（eval client 依賴）|
 | SO-101 手臂 | 已校準（校準檔在 SO-ARM100/calibration/），尚未接上 |
 | USB 攝影機 | 未接上 |
 
@@ -183,7 +185,41 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # 預期輸出：2.10.0 True
 ```
 
-### 3.2 方式 B：Docker 安裝（選用）
+### 3.2 安裝推論 Client 依賴（lerobot + draccus）
+
+`eval_so100.py` 需要 lerobot 和 draccus，但它們**不在** GR00T 的 pyproject.toml 裡，需要另外安裝。
+
+> **重要**：必須用 `--no-deps` 安裝 lerobot，否則它會把 PyTorch 2.10.0 降級成 2.7.1+cpu（來自 PyPI 預設源），同時 torchcodec 也會被替換成預編譯版（缺少 FFmpeg 7 支援），導致整個 GR00T 環境損壞。
+
+```bash
+cd Isaac-GR00T
+source .venv/bin/activate
+
+# lerobot — 必須 --no-deps，避免拉入不相容的 PyTorch
+uv pip install --no-deps "lerobot @ git+https://github.com/huggingface/lerobot.git@c75455a6de5c818fa1bb69fb2d92423e86c70475"
+
+# lerobot 和 draccus 的必要依賴（不會影響 PyTorch）
+uv pip install --no-deps draccus
+uv pip install mergedeep pyyaml-include typing-inspect pyserial deepdiff orderly-set
+```
+
+確認安裝正確（所有套件共存）：
+
+```bash
+source scripts/activate_thor.sh
+python -c "
+import torch; print('torch', torch.__version__, 'CUDA:', torch.cuda.is_available())
+import torchcodec; print('torchcodec OK')
+import lerobot; print('lerobot', lerobot.__version__)
+from lerobot.robots import so101_follower; print('so101_follower OK')
+import draccus; print('draccus OK')
+"
+# 預期：全部 OK，torch 2.10.0 CUDA: True
+```
+
+> **如果環境被破壞了**：用 `uv sync` 搭配 Thor 的 pyproject.toml 恢復 PyTorch，然後從原始碼重編 torchcodec，最後再用 `--no-deps` 重裝 lerobot。完整修復步驟見故障排除。
+
+### 3.3 方式 B：Docker 安裝（選用）
 
 ```bash
 cd Isaac-GR00T/docker
@@ -207,7 +243,7 @@ sudo docker run --rm -it \
   gr00t-thor
 ```
 
-### 3.3 下載預訓練模型
+### 3.4 下載預訓練模型
 
 模型檔約 5GB，下載到 `Isaac-GR00T/pretrained/`（已加入 `.gitignore`，不會被 commit）：
 
@@ -492,6 +528,52 @@ python gr00t/eval/real_robot/SO100/eval_so100.py \
 | torch.compile / Triton 失敗 | 確認已執行 `source scripts/activate_thor.sh`（設定 CUDA_HOME 等）|
 | N1.6 過擬合 | 加強 `--color_jitter_params`、增加 `--weight_decay` |
 | `KeyError: 'new_embodiment'`（推論 server）| 必須用 fine-tuned checkpoint，不能用 pretrained 模型。Pretrained 的 `processor_config.json` 只含 `behavior_r1_pro`、`gr1`、`robocasa_panda_omron`，fine-tune 時 `so100_config.py` 的 config 才會被寫入 checkpoint |
+| lerobot 安裝後 PyTorch 被降級 / CUDA 失效 | lerobot 的依賴會從 PyPI 拉入 CPU 版 torch 2.7.1，覆蓋 Jetson 專用的 2.10.0。見下方修復步驟 |
+
+### 9.1 修復 lerobot 破壞的環境
+
+如果不慎用 `uv pip install lerobot`（沒加 `--no-deps`），環境會損壞：PyTorch 降級、torchcodec 被替換。修復步驟：
+
+```bash
+cd Isaac-GR00T
+
+# 步驟 1：用 Thor pyproject.toml 恢復 PyTorch 和核心套件
+cp scripts/deployment/thor/pyproject.toml pyproject.toml.bak
+cp pyproject.toml pyproject.toml.orig
+cp scripts/deployment/thor/pyproject.toml pyproject.toml
+cp scripts/deployment/thor/uv.lock uv.lock
+source .venv/bin/activate
+uv sync
+
+# 步驟 2：還原 pyproject.toml
+mv pyproject.toml.orig pyproject.toml
+rm pyproject.toml.bak uv.lock
+
+# 步驟 3：從原始碼重編 torchcodec（需要 FFmpeg dev libs 已安裝）
+source scripts/activate_thor.sh
+SITE_PKGS=".venv/lib/python3.12/site-packages"
+NVIDIA_LIB_DIRS="$(find "${SITE_PKGS}/nvidia" -name "lib" -type d 2>/dev/null | tr '\n' ':')"
+export LD_LIBRARY_PATH="${SITE_PKGS}/torch/lib:${NVIDIA_LIB_DIRS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export CUDA_HOME=/usr/local/cuda-13.0
+export CUDA_PATH=/usr/local/cuda-13.0
+export CPATH="${CUDA_HOME}/include:${CPATH:-}"
+export C_INCLUDE_PATH="${CUDA_HOME}/include:${C_INCLUDE_PATH:-}"
+export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include:${CPLUS_INCLUDE_PATH:-}"
+rm -rf /tmp/torchcodec
+git clone --depth 1 --branch v0.10.0 https://github.com/pytorch/torchcodec.git /tmp/torchcodec
+cd /tmp/torchcodec
+I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 uv pip install . --no-build-isolation
+cd - && rm -rf /tmp/torchcodec
+
+# 步驟 4：重新安裝 lerobot（這次用 --no-deps）
+uv pip install --no-deps "lerobot @ git+https://github.com/huggingface/lerobot.git@c75455a6de5c818fa1bb69fb2d92423e86c70475"
+uv pip install --no-deps draccus
+uv pip install mergedeep pyyaml-include typing-inspect pyserial deepdiff orderly-set
+
+# 驗證
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# 預期：2.10.0 True
+```
 
 ---
 
@@ -511,6 +593,9 @@ python gr00t/eval/real_robot/SO100/eval_so100.py \
 | flash-attn | 2.8.4 |
 | triton | 3.5.0 |
 | wandb | 0.23.0 |
+| lerobot | 0.4.1（commit c75455a，`--no-deps` 安裝）|
+| draccus | 0.11.5 |
+| torchcodec | 0.10.0a0（從原始碼編譯）|
 | GR00T | N1.6-3B |
 
 ---
