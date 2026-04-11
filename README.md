@@ -142,15 +142,40 @@ Seeed Studio wiki 教學原本使用 GR00T N1.5，但 Isaac-GR00T `main` branch 
 6. [資料收集](#6-資料收集)
 7. [模型微調](#7-模型微調)
 8. [Jetson Thor 推論部署](#8-jetson-thor-推論部署)
-9. [故障排除](#9-故障排除)
+9. [Scripts 總覽](#scripts-總覽)
+10. [故障排除](#9-故障排除)
 
 ---
 
 ## 1. 硬體需求
 
 ### Jetson AGX Thor（本機）
-- Blackwell GPU 架構，128GB 記憶體
-- CUDA 13.0、Driver 580.00
+
+Thor 是 NVIDIA 為**具身智能（Embodied AI）**設計的邊緣運算平台，與 GR00T 是同一生態系——GR00T 負責模型，Thor 負責部署推論。
+
+本專案使用的是 **Thor T5000**：
+
+| 規格 | Thor T4000 | Thor T5000（本機）| RTX 4090（桌機對比）|
+|------|-----------|-------------------|---------------------|
+| 架構 | Blackwell | Blackwell | Ada Lovelace |
+| CUDA Cores | 1,536 | 2,560 | 16,384 |
+| Tensor Cores | 64 | 96 | 512 |
+| SM 數量 | ~12 | ~20 | 128 |
+| 記憶體 | 64 GB LPDDR5X | **128 GB LPDDR5X** | 24 GB GDDR6X |
+| AI 算力（FP4）| 1,200 TOPS | 2,070 TOPS | — |
+| 功耗 | 40-70W | 40-130W | ~450W |
+
+**為什麼用 Thor 而不是桌機 GPU？**
+
+- **記憶體大**：128GB 統一記憶體，GR00T 3B 模型整個放得下不需量化
+- **功耗低**：可以裝在機器人旁邊，不需連回伺服器
+- **即時推論**：機器人控制需要低延遲，不能忍受網路來回
+
+**Thor 的限制**：
+
+- CUDA Cores 只有 RTX 4090 的 1/6，跑大語言模型（>7B）會很慢
+- 設計甜蜜點是 **3B-7B** 等級的模型即時推論，剛好就是 GR00T 的大小
+- 訓練也能跑（如本專案的微調），但速度不如桌機 GPU
 
 ### SO-101 手臂
 - 主臂（Leader）+ 從臂（Follower）各一組
@@ -771,9 +796,9 @@ wandb login
 
 ### 7.2 實際訓練紀錄
 
-以下是在 Jetson AGX Thor 上的首次微調結果（2026-04-11）：
+#### 第一次：10 episodes, 1000 步（效果不佳）
 
-#### 資料集
+##### 資料集
 
 | 項目 | 數值 |
 |------|------|
@@ -828,7 +853,56 @@ step     loss
 1000    ~0.06   ← 收斂
 ```
 
-> **觀察**：10 個 episode 的小資料集，loss 在 600 步左右基本收斂。N1.6 收斂速度很快，但也意味著容易 overfit。實際效果需要透過推論測試驗證。
+> **觀察**：10 個 episode 的小資料集，loss 在 600 步左右基本收斂。N1.6 收斂速度很快，但也意味著容易 overfit。
+>
+> **推論測試結果**：checkpoint-1000 和 checkpoint-200 都無法正常完成任務。原因：資料量太少（10 episodes / 3.3 分鐘）+ 攝影機 front/wrist 標籤反了。
+
+---
+
+#### 第二次：50 episodes, 2000 步
+
+##### 資料集
+
+| 項目 | 數值 |
+|------|------|
+| 任務 | pick up the ball and place it in the cup |
+| Episodes | 50（lerobot 預設上限，自動停止）|
+| 總幀數 | 29,705 frames |
+| 每 episode 長度 | 588～596 frames（約 19.8 秒）|
+| 總時長 | 16.5 分鐘 |
+| 攝影機 | 2 個（wrist=video0, front=video2），30 FPS（已修正標籤）|
+| 格式 | LeRobot v3.0 → v2.1（經 `convert_v3_to_v2.py` 轉換）|
+
+##### 訓練參數
+
+| 參數 | 值 |
+|------|-----|
+| 基礎模型 | GR00T-N1.6-3B |
+| max_steps | 2,000（NVIDIA 官方建議基準）|
+| global_batch_size | 32 |
+| learning_rate | 1e-4 |
+| lr_scheduler | cosine |
+| warmup_ratio | 0.05 |
+| weight_decay | 1e-5 |
+| color_jitter | brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08 |
+| DiT dropout | 0.2 |
+| action representation | relative（state-relative） |
+| action horizon | 16 steps |
+| deepspeed | stage 2 |
+| precision | bf16 |
+| dataloader_num_workers | 4 |
+
+##### 訓練結果
+
+| 指標 | 數值 |
+|------|------|
+| 總訓練時間 | **1 小時 17 分鐘**（4641 秒）|
+| 訓練速度 | 0.43 steps/sec, 13.8 samples/sec |
+| 平均 loss | 0.106 |
+| Checkpoint 數量 | 4 個（500, 1000, 1500, 2000 步）|
+| 每個 checkpoint 大小 | 約 22 GB |
+
+> **觀察**：平均 loss 0.106，比第一次（0.045）高，但這是正常的——資料量多 5 倍、多樣性更高，模型沒那麼容易 overfit。實際效果待推論測試驗證。
 
 ### 7.3 在雲端微調（NVIDIA Brev）
 
@@ -895,6 +969,36 @@ python gr00t/eval/real_robot/SO100/eval_so100.py \
 推論架構為 server-client 分離：
 - `run_gr00t_server.py`：在 GPU 上跑模型推論
 - `eval_so100.py`：負責攝影機影像擷取、機械臂控制，透過 ZMQ 將觀測資料送給 server 並接收動作指令
+
+---
+
+## Scripts 總覽
+
+所有 script 都在 `scripts/` 目錄下，從專案根目錄執行。
+
+### 日常操作
+
+| Script | 用法 | 說明 |
+|--------|------|------|
+| `check_cameras.sh` | `bash scripts/check_cameras.sh` | 拍照確認攝影機角度，存到 `camera_check/` |
+| `preflight_check.sh` | `bash scripts/preflight_check.sh` | 錄製前預檢（driver、馬達、攝影機、port 權限）|
+| `teleop_test.sh` | `bash scripts/teleop_test.sh` | 測試遙操作（不錄資料）|
+| `record_data.sh` | `bash scripts/record_data.sh [name]` | 錄製訓練資料（預設 50 episodes）|
+| `convert_v3_to_v2.py` | `python3 scripts/convert_v3_to_v2.py <in> <out>` | 轉換 LeRobot v3.0 → v2.1 格式 |
+| `train.sh` | `bash scripts/train.sh [dataset] [steps]` | 微調 GR00T（預設 2000 步，建議用 screen）|
+| `start_server.sh` | `bash scripts/start_server.sh [checkpoint]` | 啟動推論 Server（可傳數字如 `1000`）|
+| `start_eval.sh` | `bash scripts/start_eval.sh [instruction]` | 啟動推論 Client 控制 follower |
+
+### 校準與維修
+
+| Script | 用法 | 說明 |
+|--------|------|------|
+| `calibrate.sh` | `bash scripts/calibrate.sh [both\|leader\|follower]` | 校準手臂 |
+| `diagnose_wrist_roll.py` | `python3 scripts/diagnose_wrist_roll.py` | 讀取 wrist_roll 硬體寄存器，分析 teleop 映射 |
+| `debug_teleop_wrist.py` | `python3 scripts/debug_teleop_wrist.py` | 單軸 wrist_roll teleop 測試，逐步印出數值 |
+| `fix_follower_wrist_offset.py` | `python3 scripts/fix_follower_wrist_offset.py` | 修正 follower wrist_roll 負 offset（PID 失控修復）|
+| `reset_wrist_roll.py` | `python3 scripts/reset_wrist_roll.py` | 重設 wrist_roll 馬達限制和校準 |
+| `fix_wrist_roll.sh` | `bash scripts/fix_wrist_roll.sh` | 舊版 wrist_roll 修正（已被 fix_follower 取代）|
 
 ---
 
