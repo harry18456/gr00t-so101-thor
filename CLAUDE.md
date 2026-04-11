@@ -61,7 +61,7 @@ python gr00t/eval/run_gr00t_server.py --model_path ./so101-checkpoints/checkpoin
 
 Terminal 2 — robot client:
 ```bash
-python gr00t/eval/real_robot/SO100/eval_so100.py --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_awesome_follower_arm --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" --policy_host=0.0.0.0 --lang_instruction="<task description>"
+python gr00t/eval/real_robot/SO100/eval_so100.py --robot.type=so101_follower --robot.port=/dev/ttyACM1 --robot.id=my_awesome_follower_arm --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" --policy_host=0.0.0.0 --lang_instruction="<task description>"
 ```
 
 ### Rebuild GR00T environment from scratch
@@ -108,10 +108,14 @@ If the environment is already broken, see README Section 9.1 for full recovery s
 
 - **N1.6 vs N1.5**: Fine-tune script is `gr00t/experiment/launch_finetune.py` (NOT `scripts/gr00t_finetune.py`). For N1.5, checkout `n1.5-release` branch.
 - **Two separate environments**: GR00T inference runs in `Isaac-GR00T/.venv` (Python 3.12). Data collection uses LeRobot on a separate PC (Python 3.10).
-- **Arm port mapping on Thor**: leader=`/dev/ttyACM1`, follower=`/dev/ttyACM0`. After reboot, run `sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1`.
+- **Arm port mapping on Thor**: leader=`/dev/ttyACM0`, follower=`/dev/ttyACM1`. After reboot, run `sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1`. Port assignment may swap after USB re-plug; verify with `scripts/preflight_check.sh`.
+- **Camera mapping on Thor**: `video0` = wrist cam (pointing down at table), `video2` = front cam (viewing arm from front). Must be on different USB hub chips.
 - **Arm calibration on Thor**: Stored in `~/.cache/huggingface/lerobot/calibration/`. Calibration also exists in `SO-ARM100/calibration/` (from separate PC).
+- **Wrist roll (motor ID 5) critical**: STS3215 firmware has a PID runaway bug with negative `homing_offset`. After calibration, always verify `wrist_roll.homing_offset >= 0` in the calibration JSON. If negative, run `python3 scripts/fix_follower_wrist_offset.py`. See README 9.2 for full details.
 - **Submodules**: `Isaac-GR00T`, `SO-ARM100`, and `CH341SER` are git submodules. After cloning, run `git submodule update --init --recursive`.
 - **Dataset path**: Store training data in `./datasets/`, not inside `Isaac-GR00T/` (which is a submodule).
+- **Dataset format conversion**: lerobot 0.4.1 records v3.0 format, but GR00T fine-tune requires v2.1. Run `python3 scripts/convert_v3_to_v2.py <input> <output>` to convert. Key differences: v3.0 has one parquet/mp4 for all episodes; v2.1 needs per-episode files + `episodes.jsonl` + `tasks.jsonl` + `modality.json`.
+- **Recording args**: Use `--dataset.push_to_hub=false` (NOT `--dataset.local_files_only=true` which was removed in lerobot 0.4.1). Thor's X display is `:1` (not `:0`), set `DISPLAY=:1` for pynput keyboard control.
 - **Camera constraint**: Two USB cameras must be on different USB hub chips on Thor.
 - **NVPL dependency**: PyTorch on Thor requires `libnvpl-lapack0` and `libnvpl-blas0`. `install_deps.sh` handles this via the NVIDIA CUDA apt repo for `ubuntu2404/sbsa`.
 - **PEP 668**: Thor's Ubuntu 24.04 blocks `sudo pip3`. Use `uv tool install` for system-wide tools (e.g., `jetson-stats`).

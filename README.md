@@ -8,6 +8,76 @@
 
 ---
 
+## GR00T 模型簡介
+
+GR00T（**G**eneralist **R**obot **00** **T**echnology）是 NVIDIA 開發的 **Vision-Language-Action (VLA)** 基礎模型，專為通用機器人操控設計。核心概念是：**看圖 + 聽指令 + 感知狀態 → 輸出動作**。
+
+### 架構
+
+GR00T N1.6 是 3B 參數的多模態模型，由三個模組組成：
+
+| 模組 | 說明 |
+|------|------|
+| **Vision Encoder**（Eagle-Block2A-2B-v2）| 將攝影機影像編碼為 visual tokens（輸入 448×448，推論時縮放至 256×256）|
+| **Language Model**（Qwen2 Tokenizer）| 處理自然語言任務描述，讓模型理解「要做什麼」|
+| **Diffusion Transformer (DiT)**（32 層）| 結合 vision + language + 機器人狀態，透過 diffusion 預測未來的動作軌跡 |
+
+### 輸入 / 輸出
+
+| 輸入 | 說明 |
+|------|------|
+| 攝影機影像 | 1～2 個視角（如 front + wrist）|
+| 語言指令 | 自然語言任務描述（如 "pick up the ball and place it in the cup"）|
+| 機器人狀態 | 當前關節角度（state vector）|
+
+| 輸出 | 說明 |
+|------|------|
+| Action trajectory | 未來 N 步的關節動作序列（action horizon 最大 50，本專案使用 16）|
+
+### 設計特點
+
+- **Embodiment-agnostic**：透過 `embodiment_tag` + `modality_config` 適配不同機器人（SO-100、Panda、GR1 等），最大支援 128 維 state/action
+- **預訓練 + 微調**：NVIDIA 用大量機器人資料預訓練，使用者只需少量示範資料（幾十～幾百個 episode）即可微調到自己的任務
+- **State-relative prediction**（N1.6）：預測相對動作而非絕對位置，泛化能力更好，但更容易 overfit
+
+### 語言指令的角色
+
+語言指令貫穿整個流程：
+
+```
+收集資料: --task="pick up the ball and place it in the cup"  ← 記錄在 tasks 中
+微調訓練: 模型學到「這組影像+狀態+動作」對應這句描述
+推論部署: --lang_instruction="pick up the ball and place it in the cup"  ← 模型據此決定行為
+```
+
+單任務微調時，語言指令的影響較小（模型只學過一種行為）。多任務微調時，語言指令是區分不同任務的關鍵。
+
+### Human in the Loop (HITL)
+
+本專案採用 **Human in the Loop** 的學習方式——模型透過模仿人類示範來學習，而非自行探索：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Human in the Loop          Human out of the Loop       │
+│                                                         │
+│  人類遙操作示範 → 錄製資料 → 微調模型 → 模型自主執行    │
+│  (teleop)         (record)   (fine-tune)  (inference)   │
+│       ↑                                       │         │
+│       └──── 效果不好？再補幾個示範 ────────────┘         │
+└─────────────────────────────────────────────────────────┘
+```
+
+| 階段 | 人類角色 | 說明 |
+|------|----------|------|
+| 資料收集 | **直接操控**（in the loop）| 人類操控 leader 手臂，follower 跟隨並錄製動作 |
+| 微調訓練 | 不參與 | 模型從人類示範中學習模仿 |
+| 推論部署 | **監督**（on the loop）| 模型自主執行，人類觀察必要時介入 |
+| 持續改進 | **回到 loop** | 模型表現不佳時，補充更多人類示範後重新微調 |
+
+這個循環是漸進式的：先收集少量示範（如 10 個 episode）→ 微調測試 → 根據效果決定是否需要更多資料。
+
+---
+
 ## 為什麼從 N1.5 升級到 N1.6
 
 Seeed Studio wiki 教學原本使用 GR00T N1.5，但 Isaac-GR00T `main` branch 已更新至 N1.6。
@@ -46,6 +116,7 @@ Seeed Studio wiki 教學原本使用 GR00T N1.5，但 Isaac-GR00T `main` branch 
 | GR00T-N1.6-3B 模型 | 已下載（Isaac-GR00T/pretrained/GR00T-N1.6-3B）|
 | N1.6 推論 Server 測試 | ✓ 模型載入成功（DiT 1.09B params），pretrained 不含 SO100 config 屬正常（需 fine-tune 後才有）|
 | N1.6 Fine-tune 測試 | ✓ 用 demo_data/cube_to_bowl_5 跑 5 步成功（train_loss=1.099），checkpoint 含 `new_embodiment` config |
+| E2E Pipeline 測試 | ✓ fine-tune → server → client 推論全流程通過（2026-04-11），action shape (1,16,5)+(1,16,1) |
 | wandb | 已安裝（0.23.0）|
 | so100_config.py | ✓ 已確認符合 SO-101（2 cam、6 joints + gripper、16 步 action horizon）|
 | CH34x 驅動 | 已安裝（CH341SER submodule，kernel module 已載入）|
@@ -54,14 +125,15 @@ Seeed Studio wiki 教學原本使用 GR00T N1.5，但 Isaac-GR00T `main` branch 
 | feetech-servo-sdk | 已安裝（scservo_sdk，手臂 servo 通訊）|
 | rerun-sdk | 已安裝（lerobot 遙操作視覺化）|
 | SO-101 手臂 | ✓ 已接上並校準，遙操作測試通過（leader→follower 60Hz）|
-| 手臂 Port 對應 | leader=/dev/ttyACM1, follower=/dev/ttyACM0 |
+| 手臂 Port 對應 | `/dev/ttyACM0` = leader、`/dev/ttyACM1` = follower（插拔後可能交換，用 `scripts/preflight_check.sh` 確認）|
 | 手臂校準檔 | `~/.cache/huggingface/lerobot/calibration/` （Thor 上重新校準）|
-| USB 攝影機 | ✓ 已接上（video0, video2），兩台皆 USB 2.0 Camera |
+| USB 攝影機 | `video0` = wrist cam（朝下看桌面）、`video2` = front cam（從前方看手臂），兩台必須接不同 USB hub chip |
 
 ---
 
 ## 目錄
 
+0. [GR00T 模型簡介](#gr00t-模型簡介)
 1. [硬體需求](#1-硬體需求)
 2. [基礎環境安裝](#2-基礎環境安裝)
 3. [GR00T 環境安裝（Thor）](#3-gr00t-環境安裝thor)
@@ -352,7 +424,117 @@ Starting GR00T inference server...
 
 Server 啟動後按 `Ctrl+C` 結束。
 
-### 4.4 so100_config.py 驗證
+### 4.4 End-to-End Pipeline 驗證（fine-tune → server → client 推論）
+
+**目的**：不接實體手臂的情況下，驗證整條推論鏈路能跑通 —— fine-tune 產出的 checkpoint 能被 server 載入、client 能透過 ZMQ 送出 observation 並收到正確 shape 的 action。
+
+#### 步驟一：啟動推論 server（Terminal 1）
+
+使用 4.1 產出的 demo checkpoint：
+
+```bash
+cd Isaac-GR00T
+source .venv/bin/activate
+source scripts/activate_thor.sh
+
+CUDA_VISIBLE_DEVICES=0 python gr00t/eval/run_gr00t_server.py \
+  --model_path /tmp/so100_finetune_test/checkpoint-5 \
+  --embodiment_tag NEW_EMBODIMENT
+```
+
+等待看到 `Loading checkpoint shards: 100%` 且 port 5555 處於 LISTEN 狀態：
+
+```bash
+# 另開 terminal 確認
+lsof -i :5555
+# 預期：python <PID> asus ... TCP *:5555 (LISTEN)
+```
+
+> **注意**：server 的 stdout 不一定會印出 "ready" 字樣，用 `lsof` 確認 port 是最可靠的方式。
+
+#### 步驟二：用 Python client 發送 dummy observation（Terminal 2）
+
+```bash
+cd Isaac-GR00T
+source .venv/bin/activate
+source scripts/activate_thor.sh
+
+python3 -c "
+from gr00t.policy.server_client import PolicyClient
+import numpy as np
+
+client = PolicyClient(host='localhost', port=5555, timeout_ms=60000)
+
+# 1. Ping 測試
+print('Ping...', client.ping())
+
+# 2. 構造 dummy observation（格式必須完全正確，否則 server 會拒絕）
+obs = {
+    'video': {
+        'front': np.random.randint(0, 255, (1, 1, 256, 256, 3), dtype=np.uint8),
+        'wrist': np.random.randint(0, 255, (1, 1, 256, 256, 3), dtype=np.uint8),
+    },
+    'state': {
+        'single_arm': np.zeros((1, 1, 5), dtype=np.float32),
+        'gripper':    np.zeros((1, 1, 1), dtype=np.float32),
+    },
+    'language': {
+        'annotation.human.task_description': [['pick up the cube and place it in the bowl']],
+    },
+}
+
+# 3. 呼叫推論
+action, info = client.get_action(obs)
+for k, v in action.items():
+    print(f'  {k}: shape={v.shape}, dtype={v.dtype}, range=[{v.min():.4f}, {v.max():.4f}]')
+"
+```
+
+預期輸出：
+
+```
+Ping... True
+  single_arm: shape=(1, 16, 5), dtype=float32, range=[..., ...]
+  gripper: shape=(1, 16, 1), dtype=float32, range=[..., ...]
+```
+
+#### Observation 格式規格（易錯，重要）
+
+| Modality | Key | Shape | Dtype | 說明 |
+|----------|-----|-------|-------|------|
+| `video.front` | `obs['video']['front']` | `(B, T, H, W, 3)` | `uint8` | **必須 5D**，T=時間步 |
+| `video.wrist` | `obs['video']['wrist']` | `(B, T, H, W, 3)` | `uint8` | 同上 |
+| `state.single_arm` | `obs['state']['single_arm']` | `(B, T, 5)` | `float32` | **5 維**（不是 6），不含 gripper |
+| `state.gripper` | `obs['state']['gripper']` | `(B, T, 1)` | `float32` | 夾爪單獨一個 key |
+| `language` | `obs['language']['annotation.human.task_description']` | `list[list[str]]` | — | **雙層 list**：外層=batch, 內層=temporal |
+
+> **常見錯誤**：
+> - video 用 4D `(B,H,W,C)` → 缺少時間維度 T，server 回報 shape 錯誤
+> - state 用 `float64` → server 要求 `float32`
+> - state 用 2D `(B,D)` → 缺少時間維度 T
+> - `single_arm` 用 6 維 → 實際是 5 維（gripper 獨立），推論時 boolean index 不匹配
+> - language 用 `['text']` → 需要 `[['text']]`（雙層 list）
+
+#### Action 輸出格式
+
+| Key | Shape | 說明 |
+|-----|-------|------|
+| `single_arm` | `(B, 16, 5)` | 16 步 action horizon，5 個關節的相對動作 |
+| `gripper` | `(B, 16, 1)` | 16 步 action horizon，夾爪動作 |
+
+> 數值範圍在 demo checkpoint（僅 5 步訓練）下會很大且無意義，這是正常的。正式訓練後數值應收斂到合理範圍。
+
+#### 驗證完畢後清理
+
+```bash
+# 停止 server
+lsof -ti :5555 | xargs kill
+
+# 清理 demo checkpoint（可選）
+rm -rf /tmp/so100_finetune_test
+```
+
+### 4.5 so100_config.py 驗證
 
 `examples/SO100/so100_config.py` 定義了 SO-101 的 modality 配置：
 
@@ -379,19 +561,31 @@ SO-ARM100/calibration/
 └── leader/calibration.json     # 主臂校準資料（6 joints, ID 1-6, STS3215 servo）
 ```
 
-### 5.1 攝影機配置
+### 5.1 裝置對應表
 
-接上兩個 USB 攝影機：
-- **腕部攝影機**：接至 USB-A 埠
-- **桌面攝影機**：接至靠近 QSFP28 的 USB Type-C 埠（需外接 USB hub）
+#### 手臂 Serial Port
+
+| Port | 裝置 | 說明 |
+|------|------|------|
+| `/dev/ttyACM0` | **Leader**（主臂）| 人類操控用，無 torque |
+| `/dev/ttyACM1` | **Follower**（從臂）| 跟隨 leader 或由模型控制 |
+
+> **注意**：插拔 USB 後 port 編號可能交換。用 `bash scripts/preflight_check.sh` 確認，或比對校準檔中的 `homing_offset` 來判斷哪個是哪個。
+
+#### 攝影機
+
+| 裝置 | 攝影機 | 角度 | USB 埠 |
+|------|--------|------|--------|
+| `video0` | **Wrist cam**（腕部）| 朝下看 gripper 前方桌面 | USB-A 埠 |
+| `video2` | **Front cam**（桌面）| 從前方/上方看整個工作區 | USB Type-C 埠（靠近 QSFP28，需外接 hub）|
 
 > **關鍵限制**: 兩台攝影機必須接在不同的 USB hub chip，否則 Jetson 無法同時串流。
 
-確認攝影機裝置號：
+確認攝影機角度：
 
 ```bash
-ls /dev/video*
-# 通常 wrist=index 0, front=index 2
+bash scripts/check_cameras.sh
+# 照片存在 camera_check/front.jpg 和 camera_check/wrist.jpg
 ```
 
 ---
@@ -412,43 +606,102 @@ source .venv/bin/activate
 source scripts/activate_thor.sh
 
 python -m lerobot.scripts.lerobot_teleoperate \
-  --teleop.type=so101_leader --teleop.port=/dev/ttyACM1 --teleop.id=my_awesome_leader_arm \
-  --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_awesome_follower_arm
+  --teleop.type=so101_leader --teleop.port=/dev/ttyACM0 --teleop.id=my_awesome_leader_arm \
+  --robot.type=so101_follower --robot.port=/dev/ttyACM1 --robot.id=my_awesome_follower_arm
 ```
 
-> **Port 對應**（Thor 上實測）：leader=`/dev/ttyACM1`、follower=`/dev/ttyACM0`。
+> **Port 對應**（Thor 上實測）：leader=`/dev/ttyACM0`、follower=`/dev/ttyACM1`。
 > 如果跳校準提示，按 Enter 使用已有的校準檔（存在 `~/.cache/huggingface/lerobot/calibration/`）。
 
 #### 錄製資料集
 
+使用快捷 script（推薦）：
+
 ```bash
-python -m lerobot.scripts.lerobot_record \
-  --teleop.type=so101_leader --teleop.port=/dev/ttyACM1 --teleop.id=my_awesome_leader_arm \
-  --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_awesome_follower_arm \
-  --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
-  --dataset.repo_id=<your-hf-username>/<dataset-name> \
-  --dataset.local_files_only=true
+bash scripts/record_data.sh <dataset-name>
+# 例如: bash scripts/record_data.sh so101_pick_place
 ```
 
-> **注意**：camera index 可能需要根據實際接法調整（video0/video2）。
+或手動執行：
+
+```bash
+export DISPLAY="${DISPLAY:-:1}"  # Thor 的 X display 是 :1
+
+python -m lerobot.scripts.lerobot_record \
+  --teleop.type=so101_leader --teleop.port=/dev/ttyACM0 --teleop.id=my_awesome_leader_arm \
+  --robot.type=so101_follower --robot.port=/dev/ttyACM1 --robot.id=my_awesome_follower_arm \
+  --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+  --dataset.repo_id=<your-hf-username>/<dataset-name> \
+  --dataset.push_to_hub=false \
+  --dataset.episode_time_s=20 \
+  --dataset.reset_time_s=10 \
+  --dataset.single_task="pick up the ball and place it in the cup"
+```
+
+> **注意**：
+> - 用 `--dataset.push_to_hub=false` 而非 `--dataset.local_files_only=true`（後者在 lerobot 0.4.1 已移除）
+> - Camera index: wrist=0, front=2（Thor 上實測，見 5.1 節）
+> - 需要 `DISPLAY` 環境變數，否則 pynput 鍵盤控制會報錯
+> - 錄完的資料存在 `~/.cache/huggingface/lerobot/<username>/<dataset-name>/`
+
+#### 格式轉換（v3.0 → v2.1）
+
+**重要**：lerobot 0.4.1 錄出的是 v3.0 格式，但 GR00T fine-tune 需要 v2.1 格式。錄完後必須轉換：
+
+```bash
+# 複製到 datasets/ 目錄
+cp -r ~/.cache/huggingface/lerobot/<username>/<dataset-name> datasets/
+
+# 轉換格式
+python3 scripts/convert_v3_to_v2.py datasets/<dataset-name> datasets/<dataset-name>_v2
+```
+
+轉換 script 做的事：
+1. 將合併的 parquet 拆為每個 episode 一個檔
+2. 將合併的 mp4 拆為每個 episode 一個（用 `-frames:v` 確保精確 frame 數）
+3. 生成 `episodes.jsonl`、`tasks.jsonl`、`modality.json`（GR00T 需要的 meta 格式）
+4. 更新 `info.json` 的 `codebase_version` 為 `v2.1`
+
+訓練時使用轉換後的目錄：`--dataset_path datasets/<dataset-name>_v2/`
+
+#### 實際資料收集紀錄（2026-04-11）
+
+| 項目 | 第一次（已刪除）| 第二次 |
+|------|----------------|--------|
+| Episodes | 10 | **50**（lerobot 預設上限）|
+| 總幀數 | 5,957 | **29,705** |
+| 每 episode | ~596 frames（19.8s）| ~594 frames（19.8s）|
+| 總時長 | 3.3 分鐘 | **16.5 分鐘** |
+| 任務 | pick up the ball and place it in the cup | 同左 |
+| 攝影機 | front + wrist（**標籤反了**）| front + wrist（已修正：video0=wrist, video2=front）|
+| 結果 | 訓練後推論效果差（資料量不足 + camera 標籤反）| 待訓練驗證 |
+
+> **經驗**：
+> - lerobot `--dataset.num_episodes` 預設為 50，錄滿自動停止
+> - 每次錄製時球和杯子位置要有變化，增加資料多樣性
+> - 錄製前用 `bash scripts/check_cameras.sh` 確認攝影機角度
+> - 10 episodes 太少，50 episodes 是合理的起點
 
 ### 6.2 從其他 PC 收集
 
 也可以在另一台 PC 上用 LeRobot 遙操作錄製，完成後傳到 Thor：
 
 ```bash
-scp -r <pc>:/path/to/dataset ~/gr00t-so101-thor/datasets/
+scp -r <pc>:/path/to/dataset ~/gr00t_for_lerobot_so_arm_and_deploy_on_jetson_thor/datasets/
 ```
 
-> **注意**：資料集放在 `datasets/` 目錄，不要放在 `Isaac-GR00T/` 內（那是 submodule）。
-
-資料集需為 **LeRobot v2.0 格式**（又稱 GR00T-flavored LeRobot v2）。詳細格式說明見 `Isaac-GR00T/getting_started/data_preparation.md`。
+> **注意**：
+> - 資料集放在 `datasets/` 目錄，不要放在 `Isaac-GR00T/` 內（那是 submodule）
+> - 如果是 lerobot v3.0 格式，同樣需要用 `convert_v3_to_v2.py` 轉換
+> - 資料集需為 **LeRobot v2.1 格式**（又稱 GR00T-flavored LeRobot v2）。詳細格式說明見 `Isaac-GR00T/getting_started/data_preparation.md`
 
 ---
 
 ## 7. 模型微調
 
 ### 7.1 在 Thor 本機微調（N1.6）
+
+> **前提**：資料集必須是 v2.1 格式（見 6.1 節格式轉換）。
 
 ```bash
 cd Isaac-GR00T
@@ -457,37 +710,57 @@ source scripts/activate_thor.sh
 
 CUDA_VISIBLE_DEVICES=0 python gr00t/experiment/launch_finetune.py \
   --base_model_path ./pretrained/GR00T-N1.6-3B \
-  --dataset_path ../datasets/<your-dataset>/ \
+  --dataset_path ../datasets/<your-dataset>_v2/ \
   --modality_config_path examples/SO100/so100_config.py \
   --embodiment_tag NEW_EMBODIMENT \
   --num_gpus 1 \
-  --output_dir ./so101-checkpoints \
+  --output_dir ../so101-checkpoints \
   --max_steps 10000 \
   --save_steps 1000 \
-  --save_total_limit 5 \
   --learning_rate 1e-4 \
   --global_batch_size 32 \
   --warmup_ratio 0.05 \
   --weight_decay 1e-5 \
   --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
-  --dataloader_num_workers 4 \
-  --use_wandb
+  --dataloader_num_workers 4
 ```
+
+小資料集（10-20 episodes）建議先跑 1000 步測試：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python gr00t/experiment/launch_finetune.py \
+  --base_model_path ./pretrained/GR00T-N1.6-3B \
+  --dataset_path ../datasets/<your-dataset>_v2/ \
+  --modality_config_path examples/SO100/so100_config.py \
+  --embodiment_tag NEW_EMBODIMENT \
+  --num_gpus 1 \
+  --output_dir ../so101-checkpoints \
+  --max_steps 1000 \
+  --save_steps 200 \
+  --learning_rate 1e-4 \
+  --global_batch_size 8 \
+  --warmup_ratio 0.05 \
+  --weight_decay 1e-5 \
+  --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
+  --dataloader_num_workers 4
+```
+
+> **注意**：`--output_dir` 建議放在 `Isaac-GR00T/` 外面（例如 `../so101-checkpoints`），避免污染 submodule。
 
 #### 參數說明
 
 | 參數 | 說明 |
 |------|------|
 | `--base_model_path` | 預訓練模型路徑（本地或 HuggingFace ID）|
-| `--dataset_path` | 訓練資料集路徑（LeRobot v2.0 格式）|
+| `--dataset_path` | 訓練資料集路徑（必須是 **LeRobot v2.1 格式**，見 6.1 節轉換）|
 | `--modality_config_path` | SO100 modality 配置（定義 camera、state、action 格式）|
 | `--embodiment_tag` | 必須用 `NEW_EMBODIMENT`（自定義機器人）|
-| `--max_steps` | 訓練步數（建議 5000-10000）|
+| `--max_steps` | 訓練步數（建議 5000-10000，小資料集先試 1000）|
 | `--save_steps` | 每 N 步存一次 checkpoint |
-| `--global_batch_size` | 全域 batch size（VRAM 不足時調小）|
+| `--global_batch_size` | 全域 batch size（VRAM 不足時調小，10 episodes 建議 8）|
 | `--color_jitter_params` | 資料增強（N1.6 容易 overfit，建議開啟）|
 | `--weight_decay` | 正則化強度（N1.6 建議 1e-5 以上）|
-| `--use_wandb` | 啟用 Weights & Biases 訓練監控（需先 `wandb login`）|
+| `--use_wandb` | 啟用 Weights & Biases 訓練監控（選用，需先 `wandb login`）|
 
 #### wandb 設定（選用）
 
@@ -496,14 +769,75 @@ wandb login
 # 輸入你的 API key（從 https://wandb.ai/authorize 取得）
 ```
 
-### 7.2 在雲端微調（NVIDIA Brev）
+### 7.2 實際訓練紀錄
+
+以下是在 Jetson AGX Thor 上的首次微調結果（2026-04-11）：
+
+#### 資料集
+
+| 項目 | 數值 |
+|------|------|
+| 任務 | pick up the ball and place it in the cup |
+| Episodes | 10（第 5 次錄製失敗已刪除，共錄 11 次）|
+| 總幀數 | 5,957 frames |
+| 每 episode 長度 | 595～596 frames（約 19.8 秒）|
+| 總時長 | 3.3 分鐘 |
+| 攝影機 | 2 個（front + wrist），30 FPS |
+| 格式 | LeRobot v3.0 → v2.1（經 `convert_v3_to_v2.py` 轉換）|
+
+#### 訓練參數
+
+| 參數 | 值 |
+|------|-----|
+| 基礎模型 | GR00T-N1.6-3B |
+| max_steps | 1,000 |
+| global_batch_size | 8 |
+| learning_rate | 1e-4 |
+| lr_scheduler | cosine |
+| warmup_ratio | 0.05 |
+| weight_decay | 1e-5 |
+| color_jitter | brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08 |
+| DiT dropout | 0.2 |
+| action representation | relative（state-relative） |
+| action horizon | 16 steps |
+| deepspeed | stage 2 |
+| precision | bf16 |
+| dataloader_num_workers | 4 |
+
+#### 訓練結果
+
+| 指標 | 數值 |
+|------|------|
+| 總訓練時間 | **21 分 44 秒**（1304 秒）|
+| 訓練速度 | 0.77 steps/sec, 6.13 samples/sec |
+| 初始 loss | ~1.10 |
+| 最終 loss | ~0.05–0.08 |
+| 平均 loss | 0.449 |
+| Checkpoint 數量 | 5 個（200, 400, 600, 800, 1000 步）|
+| 每個 checkpoint 大小 | 約 22 GB |
+
+#### Loss 變化趨勢
+
+```
+step     loss
+  10    ~1.10   ← 初始
+ 200    ~0.30   ← 快速下降
+ 400    ~0.15
+ 600    ~0.09
+ 800    ~0.08
+1000    ~0.06   ← 收斂
+```
+
+> **觀察**：10 個 episode 的小資料集，loss 在 600 步左右基本收斂。N1.6 收斂速度很快，但也意味著容易 overfit。實際效果需要透過推論測試驗證。
+
+### 7.3 在雲端微調（NVIDIA Brev）
 
 1. 登入：https://login.brev.nvidia.com/signin
 2. 建立 GPU instance（需 Ampere+，如 RTX A6000 / RTX 4090）
 3. 安裝 GR00T 並執行同樣的微調指令（`--base_model_path nvidia/GR00T-N1.6-3B` 會自動從 HuggingFace 下載）
 4. 訓練完成後將 checkpoint 傳回 Thor
 
-### 7.3 Open Loop 評估（選用）
+### 7.4 Open Loop 評估（選用）
 
 Fine-tune 完成後，可用 open loop evaluation 評估模型品質：
 
@@ -551,9 +885,9 @@ source scripts/activate_thor.sh
 
 python gr00t/eval/real_robot/SO100/eval_so100.py \
   --robot.type=so101_follower \
-  --robot.port=/dev/ttyACM0 \
+  --robot.port=/dev/ttyACM1 \
   --robot.id=my_awesome_follower_arm \
-  --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+  --robot.cameras="{wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
   --policy_host=0.0.0.0 \
   --lang_instruction="<task description>"
 ```
@@ -585,6 +919,8 @@ python gr00t/eval/real_robot/SO100/eval_so100.py \
 | N1.6 過擬合 | 加強 `--color_jitter_params`、增加 `--weight_decay` |
 | `KeyError: 'new_embodiment'`（推論 server）| 必須用 fine-tuned checkpoint，不能用 pretrained 模型。Pretrained 的 `processor_config.json` 只含 `behavior_r1_pro`、`gr1`、`robocasa_panda_omron`，fine-tune 時 `so100_config.py` 的 config 才會被寫入 checkpoint |
 | lerobot 安裝後 PyTorch 被降級 / CUDA 失效 | lerobot 的依賴會從 PyPI 拉入 CPU 版 torch 2.7.1，覆蓋 Jetson 專用的 2.10.0。見下方修復步驟 |
+| Follower wrist_roll 啟動 teleop 後順時鐘轉到底、overload | homing_offset 為負值導致 STS3215 PID runaway。見 9.2 節 |
+| 校準時 wrist_roll 出現 `ValueError: Negative values` | wrist_roll 轉太遠導致 range 出現負值，重設後重新校準。見 9.2 節 |
 
 ### 9.1 修復 lerobot 破壞的環境
 
@@ -630,6 +966,75 @@ uv pip install mergedeep pyyaml-include typing-inspect pyserial deepdiff orderly
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # 預期：2.10.0 True
 ```
+
+### 9.2 Wrist Roll 校準問題（STS3215 負 offset PID Runaway）
+
+#### 症狀
+
+Follower 的 wrist_roll（馬達 ID 5）在 teleop 啟動後立即順時鐘旋轉到極限，完全不跟隨 leader，最終 overload error。其餘 5 個關節正常。
+
+#### 根本原因
+
+STS3215 馬達韌體在 **負的 Homing_Offset** 時 PID 位置控制會變成正回饋（runaway）。Homing_Offset 用 11-bit sign-magnitude 編碼（bit 11 = 符號位），負值會導致馬達往目標的反方向加速，而非趨近目標。
+
+wrist_roll 是連續旋轉關節，校準時如果兩隻手臂的物理方向差異大，follower 的 offset 容易算出負值。
+
+> **lerobot 程式碼問題**: SO100 leader 的校準有特別處理 wrist_roll（跳過 range-of-motion，強制 range=[0, 4095]），但 SO101 leader/follower 沒有這段處理，把 wrist_roll 當普通關節校準。
+
+#### 確認方法
+
+```bash
+# 檢查校準檔的 wrist_roll homing_offset
+cat ~/.cache/huggingface/lerobot/calibration/robots/so101_follower/my_awesome_follower_arm.json | python3 -c "import json,sys; d=json.load(sys.stdin); print('wrist_roll offset:', d['wrist_roll']['homing_offset'])"
+```
+
+如果 offset 為**負值**（例如 -1017），就是這個問題。
+
+#### 診斷工具
+
+```bash
+cd Isaac-GR00T && source .venv/bin/activate && source scripts/activate_thor.sh
+
+# 1. 讀取馬達寄存器，模擬 teleop 映射
+python3 ../scripts/diagnose_wrist_roll.py
+
+# 2. 單軸 teleop 測試（最關鍵，直接看 PID 行為）
+python3 ../scripts/debug_teleop_wrist.py
+# 如果看到 follower pos 往 goal 的反方向持續增加 → 確認是負 offset PID runaway
+```
+
+#### 修復
+
+```bash
+# 自動修正 follower wrist_roll offset 為正值/零
+python3 ../scripts/fix_follower_wrist_offset.py
+
+# 修正後測試
+bash scripts/teleop_test.sh
+```
+
+修正 script 做的事：
+1. 暫時把 offset 設為 0，讀取真實 encoder 位置
+2. 重新計算 offset 確保為正值（如果 encoder < 2047 則設為 0）
+3. Range 設為 [0, 4095]（連續旋轉關節應該用全範圍）
+4. 更新馬達硬體寄存器和校準 JSON 檔
+5. 順便把 leader 的 wrist_roll range 也修正為 [0, 4095]
+
+#### 預防
+
+- **校準時**：兩隻手臂的 wrist_roll 擺在相同的物理方向，且確保 follower 的 encoder 值 > 2047（夾爪線朝前方通常就可以）
+- **校準後**：檢查校準檔中 wrist_roll 的 `homing_offset` 必須 ≥ 0
+- **wrist_roll 的 range 應永遠設為 [0, 4095]**，因為它是連續旋轉關節，沒有固定端點
+
+#### 排除過程紀錄
+
+| 嘗試 | 做法 | 結果 | 原因 |
+|------|------|------|------|
+| fix_wrist_roll.sh | 手動計算 offset 差值寫入 follower 校準檔 | 失敗 | 修正的是 offset 的「值」，但問題在「符號」 |
+| reset + 重新校準 | 馬達限制歸零、offset 歸零、重新跑校準流程 | 失敗 | 重新校準又算出負 offset |
+| diagnose_wrist_roll.py | 讀硬體寄存器、模擬映射數學 | 確認映射正確 | 問題不在映射邏輯 |
+| debug_teleop_wrist.py | 用 lerobot API 做單軸 teleop，印出每一步的值 | **發現 PID runaway** | goal=2073 但馬達從 2059 一路飆到 overload |
+| fix_follower_wrist_offset.py | 把 offset 改為 0/正值 | **成功** | 正值 offset 下 PID 正常 |
 
 ---
 
