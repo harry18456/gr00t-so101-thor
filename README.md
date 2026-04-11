@@ -51,8 +51,12 @@ Seeed Studio wiki 教學原本使用 GR00T N1.5，但 Isaac-GR00T `main` branch 
 | CH34x 驅動 | 已安裝（CH341SER submodule，kernel module 已載入）|
 | lerobot（eval 用）| 已安裝（0.4.1，`--no-deps` 安裝以避免覆蓋 PyTorch）|
 | draccus / pyserial | 已安裝（eval client 依賴）|
-| SO-101 手臂 | 已校準（校準檔在 SO-ARM100/calibration/），尚未接上 |
-| USB 攝影機 | 未接上 |
+| feetech-servo-sdk | 已安裝（scservo_sdk，手臂 servo 通訊）|
+| rerun-sdk | 已安裝（lerobot 遙操作視覺化）|
+| SO-101 手臂 | ✓ 已接上並校準，遙操作測試通過（leader→follower 60Hz）|
+| 手臂 Port 對應 | leader=/dev/ttyACM1, follower=/dev/ttyACM0 |
+| 手臂校準檔 | `~/.cache/huggingface/lerobot/calibration/` （Thor 上重新校準）|
+| USB 攝影機 | ✓ 已接上（video0, video2），兩台皆 USB 2.0 Camera |
 
 ---
 
@@ -148,6 +152,18 @@ lsmod | grep ch34
 ```
 
 > **注意**：`sudo make load` 只在本次開機有效。重開機後需重新執行 `sudo make load`，或將 `ch34x` 加入 `/etc/modules-load.d/` 讓它開機自動載入。
+
+### 2.4 每次開機後的準備工作
+
+重開機後需要重新執行：
+
+```bash
+# 1. 載入 CH34x 驅動
+cd CH341SER && sudo make load && cd ..
+
+# 2. 開放 serial port 權限（否則會 Permission denied）
+sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1
+```
 
 ---
 
@@ -382,10 +398,45 @@ ls /dev/video*
 
 ## 6. 資料收集
 
-在另一台 PC 上用 LeRobot 遙操作錄製（需安裝 LeRobot 0.4.4 + feetech 驅動、Python 3.10），完成後傳到 Thor：
+### 6.1 在 Thor 上收集（已驗證可行）
+
+LeRobot 0.4.1 已安裝在 GR00T venv 內（`--no-deps` 安裝），可直接在 Thor 上遙操作。
+
+#### 測試遙操作（不錄資料）
+
+確認 leader→follower 連動正常：
 
 ```bash
-# 從收集資料的 PC 傳到 Thor
+cd Isaac-GR00T
+source .venv/bin/activate
+source scripts/activate_thor.sh
+
+python -m lerobot.scripts.lerobot_teleoperate \
+  --teleop.type=so101_leader --teleop.port=/dev/ttyACM1 --teleop.id=my_awesome_leader_arm \
+  --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_awesome_follower_arm
+```
+
+> **Port 對應**（Thor 上實測）：leader=`/dev/ttyACM1`、follower=`/dev/ttyACM0`。
+> 如果跳校準提示，按 Enter 使用已有的校準檔（存在 `~/.cache/huggingface/lerobot/calibration/`）。
+
+#### 錄製資料集
+
+```bash
+python -m lerobot.scripts.lerobot_record \
+  --teleop.type=so101_leader --teleop.port=/dev/ttyACM1 --teleop.id=my_awesome_leader_arm \
+  --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_awesome_follower_arm \
+  --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+  --dataset.repo_id=<your-hf-username>/<dataset-name> \
+  --dataset.local_files_only=true
+```
+
+> **注意**：camera index 可能需要根據實際接法調整（video0/video2）。
+
+### 6.2 從其他 PC 收集
+
+也可以在另一台 PC 上用 LeRobot 遙操作錄製，完成後傳到 Thor：
+
+```bash
 scp -r <pc>:/path/to/dataset ~/gr00t-so101-thor/datasets/
 ```
 
@@ -520,6 +571,11 @@ python gr00t/eval/real_robot/SO100/eval_so100.py \
 | `libnvpl_lapack_lp64_gomp.so.0` 找不到 | 執行 `install_deps.sh`，會自動從 NVIDIA CUDA apt repo 安裝 NVPL |
 | `sudo pip3 install` 報 `externally-managed-environment` | Ubuntu 24.04 啟用 PEP 668，改用 `uv tool install` 或在 venv 內安裝 |
 | 找不到 Serial 裝置 `/dev/ttyACM0` | 確認 CH34x 驅動已載入（`lsmod \| grep ch34`）；先接 Serial 板再接攝影機 |
+| `Permission denied: '/dev/ttyACM0'` | 重開機後需 `sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1` |
+| `No module named 'scservo_sdk'` | `uv pip install feetech-servo-sdk` |
+| `No module named 'rerun'` | `uv pip install rerun-sdk`（安裝後確認 numpy 未被升級，否則 `uv pip install numpy==1.26.4`）|
+| `No module named 'yamlinclude'` | `uv pip install "pyyaml-include<2"`（v2.x 改了模組名，需用 1.x）|
+| 遙操作 `There is no status packet` | port 可能接反（leader↔follower 對調），或 USB 線鬆了 |
 | Type-C hub 無法辨識 | 改接靠近 QSFP28 的 Type-C 埠 |
 | 兩台攝影機串流不穩 | 確認接在不同 USB hub chip |
 | Docker image pull 失敗 | 不要用第三方 image，用 `bash build.sh --profile=thor` 本地建構 |

@@ -97,7 +97,9 @@ Correct install:
 ```bash
 uv pip install --no-deps "lerobot @ git+https://github.com/huggingface/lerobot.git@c75455a6de5c818fa1bb69fb2d92423e86c70475"
 uv pip install --no-deps draccus
-uv pip install mergedeep pyyaml-include typing-inspect pyserial deepdiff orderly-set
+uv pip install mergedeep "pyyaml-include<2" typing-inspect pyserial deepdiff orderly-set
+uv pip install feetech-servo-sdk rerun-sdk
+uv pip install numpy==1.26.4  # rerun-sdk may upgrade numpy, pin it back
 ```
 
 If the environment is already broken, see README Section 9.1 for full recovery steps (uv sync → rebuild torchcodec from source → reinstall lerobot with --no-deps).
@@ -106,6 +108,8 @@ If the environment is already broken, see README Section 9.1 for full recovery s
 
 - **N1.6 vs N1.5**: Fine-tune script is `gr00t/experiment/launch_finetune.py` (NOT `scripts/gr00t_finetune.py`). For N1.5, checkout `n1.5-release` branch.
 - **Two separate environments**: GR00T inference runs in `Isaac-GR00T/.venv` (Python 3.12). Data collection uses LeRobot on a separate PC (Python 3.10).
+- **Arm port mapping on Thor**: leader=`/dev/ttyACM1`, follower=`/dev/ttyACM0`. After reboot, run `sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1`.
+- **Arm calibration on Thor**: Stored in `~/.cache/huggingface/lerobot/calibration/`. Calibration also exists in `SO-ARM100/calibration/` (from separate PC).
 - **Submodules**: `Isaac-GR00T`, `SO-ARM100`, and `CH341SER` are git submodules. After cloning, run `git submodule update --init --recursive`.
 - **Dataset path**: Store training data in `./datasets/`, not inside `Isaac-GR00T/` (which is a submodule).
 - **Camera constraint**: Two USB cameras must be on different USB hub chips on Thor.
