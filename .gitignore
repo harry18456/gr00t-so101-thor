@@ -14,3 +14,12 @@ datasets/
 
 # Model checkpoints (each ~22GB)
 so101-checkpoints/
+
+# CH341SER build artifacts
+CH341SER/*.ko
+CH341SER/*.o
+CH341SER/*.mod
+CH341SER/*.mod.c
+CH341SER/*.cmd
+CH341SER/Module.symvers
+CH341SER/modules.order

@@ -7,3 +7,4 @@
 [submodule "CH341SER"]
 	path = CH341SER
 	url = https://github.com/juliagoda/CH341SER.git
+	ignore = dirty
