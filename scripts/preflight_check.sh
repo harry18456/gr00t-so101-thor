@@ -70,7 +70,7 @@ echo ""
 
 # 5. 馬達掃描（需要 GR00T venv）
 echo "[5/5] 馬達掃描"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROOT_DIR="${SCRIPT_DIR}/../Isaac-GR00T"
 
 if [ -f "${GROOT_DIR}/.venv/bin/activate" ]; then

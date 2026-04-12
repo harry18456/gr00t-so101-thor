@@ -278,15 +278,44 @@ lsmod | grep ch34
 
 ### 2.4 每次開機後的準備工作
 
-重開機後需要重新執行：
+重開機後的標準啟動順序：
 
 ```bash
-# 1. 載入 CH34x 驅動
-cd CH341SER && sudo make load && cd ..
+# 【1】 載入 ch34x driver + 修 serial port 權限（重開機必跑一次）
+bash scripts/post_boot.sh
 
-# 2. 開放 serial port 權限（否則會 Permission denied）
-sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1
+# 【2】 啟用 venv + Thor 環境（每個新終端都要，idempotent）
+source scripts/activate_env.sh
+
+# 【3】 預檢：driver、手臂、相機、馬達 6/6
+bash scripts/preflight_check.sh
 ```
+
+然後依工作分流：
+
+**A. 錄資料 / 遙操作**
+```bash
+bash scripts/check_cameras.sh                                    # 確認角度
+bash scripts/teleop_test.sh                                      # 不錄影測試 leader→follower
+bash scripts/record_data.sh so101_pick_place                     # 錄 50 episodes
+python3 scripts/convert_v3_to_v2.py datasets/so101_pick_place datasets/so101_pick_place_v2
+```
+
+**B. 訓練**
+```bash
+bash scripts/train.sh so101_pick_place_v2 2000                   # 約 1h17m
+```
+
+**C. 推論部署（兩個終端）**
+```bash
+# 終端 1 - server
+bash scripts/start_server.sh 2000
+
+# 終端 2 - client（先 source activate_env.sh）
+bash scripts/start_eval.sh "pick up the ball and place it in the cup"
+```
+
+> 註：語言指令要跟 `datasets/<name>/meta/tasks.jsonl` 裡的字串**完全一致**，否則模型會亂動。
 
 ---
 
@@ -930,6 +959,33 @@ step     loss
 
 > **觀察**：平均 loss 0.106，比第一次（0.045）高，但這是正常的——資料量多 5 倍、多樣性更高，模型沒那麼容易 overfit。實際效果待推論測試驗證。
 
+##### 推論測試結果（2026-04-12）
+
+| 項目 | 數值 |
+|------|------|
+| 測試 checkpoint | checkpoint-2000 |
+| 語言指令 | `pick up the ball and place it in the cup`（與 tasks.jsonl 一致）|
+| 成功率 | **1 / 20（5%）** |
+| 失敗模式 | 大多能找到球、接近目標，但**抓取精度不足**（找到抓不住）或**放置偏差**（抓到放不進杯子）|
+
+**推論時 Thor 機台狀況（運行約 5 分鐘）：**
+
+| 項目 | Server 啟動前 | Server 載入後 | 推論中 |
+|------|--------------|--------------|-------|
+| 系統記憶體（/122 GB）| 4.6 GB | 11 GB | 13 GB |
+| GPU process 記憶體 | — | 6480 MB | 6847 MB |
+| GPU 溫度 | 42°C | 43°C | 45–47°C |
+| GPU 功耗 | 3 W | 1 W | 9–10 W |
+| GPU 使用率 | 0% | 0% | 0–1%（快照，實際推論是 burst）|
+| Load avg | 0.23 | — | 0.52 |
+
+> **結論**：Thor 對 N1.6 3B 推論完全 overkill，熱/功耗/記憶體都還剩很多餘裕。瓶頸不在硬體，而在**資料量**（50 episodes 對精細抓取偏少）與**控制閉迴路頻率**。
+
+**後續改善方向：**
+1. 增加 episodes（100–300）並加強資料多樣性（球/杯位置、起始 pose）
+2. 縮小 inference action horizon（目前 8）讓控制更貼近即時回饋
+3. 比較 checkpoint-1200 / 1600 / 2000 的泛化差異
+
 ### 7.3 在雲端微調（NVIDIA Brev）
 
 1. 登入：https://login.brev.nvidia.com/signin
@@ -1165,6 +1221,71 @@ bash scripts/teleop_test.sh
 | diagnose_wrist_roll.py | 讀硬體寄存器、模擬映射數學 | 確認映射正確 | 問題不在映射邏輯 |
 | debug_teleop_wrist.py | 用 lerobot API 做單軸 teleop，印出每一步的值 | **發現 PID runaway** | goal=2073 但馬達從 2059 一路飆到 overload |
 | fix_follower_wrist_offset.py | 把 offset 改為 0/正值 | **成功** | 正值 offset 下 PID 正常 |
+
+---
+
+## 階段總結（2026-04-12）
+
+從零建置到實機跑起來的第一階段完成。記錄目前成果與後續方向。
+
+### 已完成
+
+| 階段 | 內容 | 狀態 |
+|------|------|------|
+| 1. 環境建置 | Jetson Thor + CUDA 13.0 + PyTorch 2.10 + GR00T N1.6（bare metal）| ✓ |
+| 2. 硬體整備 | SO-101 leader/follower 組裝、STS3215 wrist_roll PID bug 修復、CH34x driver、camera index 對應 | ✓ |
+| 3. 資料收集 | Teleoperation 50 episodes（16.5 分鐘，29,705 frames）+ v3→v2 轉換 | ✓ |
+| 4. 模型訓練 | N1.6-3B fine-tune 2000 steps（1h17m，loss 0.106）| ✓ |
+| 5. 推論部署 | ZMQ server/client，checkpoint-2000 實機控制 follower | ✓ |
+| 6. 端到端驗證 | `pick up the ball and place it in the cup` — 成功 1/20（5%）| ✓ |
+
+詳細訓練紀錄見 [7.2 節](#72-實際訓練紀錄)，推論機台狀況見該節末尾表格。
+
+### 目前限制
+
+- **抓取精度不足**：模型能找到物體、接近目標，但末端執行不穩定 — 失敗多集中在「找到球但抓不住」與「抓到球但放不進杯子」。
+- **資料量偏少**：50 episodes 對 N1.6-3B 這種 VLA 模型屬於下限，對精細動作學習不足。
+- **對起始 pose 敏感**：手臂初始姿勢偏離訓練資料時成功率下降明顯。
+
+### 未來方向
+
+依投入/回報排序：
+
+#### 短期（1–2 天，不改模型）
+
+1. **加資料到 150–200 episodes** — 最立竿見影。重點不是數量，是**球/杯位置、手臂起始 pose、光線、角度的多樣性**。預期 5% → 30%+。
+2. **嚴格控制推論起始 pose** — 在 `start_eval.sh` 加自動 home 到訓練第一幀的姿勢。
+3. **Checkpoint 比較** — 1200 / 1600 / 2000 跑同一組測試，找泛化最好的那個（避開尾段 overfit）。
+
+#### 中期（一週，小改程式）
+
+4. **縮小 inference action horizon**（目前 8 → 4 或 2）— 讓控制閉迴路更頻繁重新預測，改善抓取精度。
+5. **Open-loop evaluation** — 用 `open_loop_eval.py` 畫預測 vs ground truth 軌跡圖，直接看模型學歪在哪個關節/哪個階段。
+6. **加第三顆 camera**（選用）— 側面視角對深度估計有幫助。
+
+#### 長期（探索性）
+
+7. **換任務** — 同一 pipeline 跑堆疊、分類、長序列任務，測試 N1.6 的語言泛化能力。
+
+8. **引入 Isaac Sim / Isaac Lab**（NVIDIA robotics stack 完整路徑）
+   這是跟 GR00T 最匹配的大方向，能解鎖一整條新工作流：
+   - **虛擬 teleoperation 收資料** — 用 Isaac Sim 在模擬環境中操作 SO-101 虛擬模型，免去實體錄製的時間成本與馬達耗損，一晚上可以錄幾百 episode。
+   - **Domain randomization** — 模擬時隨機化光線、材質、物體顏色、相機位置、物理參數，大幅提升模型泛化能力（這是實體資料很難做到的）。
+   - **Sim-to-Real transfer** — 先用 sim data 預訓，再用少量真實資料 fine-tune，可能比純真實資料訓練效果更好、更穩。
+   - **大規模平行訓練** — Isaac Lab 支援 GPU 上同時跑數百個環境，讓 RL / imitation learning 可行。
+   - **安全測試新任務** — 在模擬裡先驗證危險或昂貴的任務（例如工具使用、雙臂協作），不怕打壞真實硬體。
+
+   **起步路徑**：先在 Isaac Sim 匯入 SO-101 URDF → 驗證物理正確 → 寫簡單 pick-place task → 跑 teleop 或 scripted policy 收資料 → 轉成 LeRobot v2.1 格式 → 接到現有 GR00T fine-tune pipeline。
+
+9. **Sim-to-Real pipeline 成熟化** — 在 8 的基礎上建立 sim→real 的標準評估流程：同一模型在 sim 成功率 vs real 成功率的 gap 有多大、哪種 domain randomization 能縮小 gap。
+
+10. **雲端訓練** — NVIDIA Brev / A6000 跑更大 batch、更多 steps，對比 Thor 本地訓練；特別是 Isaac Sim 跑大規模資料時幾乎必須用雲端 GPU。
+
+### 不建議優先做
+
+- **換 backbone / 改 DiT 架構** — 投入極高，回報不明。
+- **`tune_llm=True` / `tune_visual=True`** — 3B 規模下會破壞 pretrain 知識，通常變差。
+- **為了省時間跳過資料多樣性、只加數量** — 50 個類似的 episode ≠ 5 個不同場景的 episode，後者遠比前者有用。
 
 ---
 
