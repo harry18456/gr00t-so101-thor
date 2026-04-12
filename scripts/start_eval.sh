@@ -8,8 +8,8 @@
 
 LANG_INSTRUCTION="${1:-pick up the ball and place it in the cup}"
 FOLLOWER_PORT="/dev/ttyACM1"
-WRIST_CAM=2
-FRONT_CAM=0
+WRIST_CAM=0
+FRONT_CAM=2
 
 echo "=== GR00T 推論 Client ==="
 echo "  Follower: $FOLLOWER_PORT"
