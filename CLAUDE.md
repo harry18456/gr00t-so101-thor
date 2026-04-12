@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-Fine-tuning NVIDIA Isaac GR00T N1.6 (Vision-Language-Action model) for the LeRobot SO-101 robotic arm, deployed on Jetson AGX Thor. The workflow is: collect teleoperation data (on a separate PC) → fine-tune GR00T → run inference on Thor to control the follower arm autonomously.
+Fine-tuning NVIDIA Isaac GR00T N1.6 (Vision-Language-Action model) for the LeRobot SO-101 robotic arm, deployed on Jetson AGX Thor. The workflow is: collect teleoperation data → fine-tune GR00T → run inference on Thor to control the follower arm autonomously.
 
-**Note**: The Seeed Studio wiki tutorial targets N1.5, but this project uses N1.6 (main branch). N1.6 uses state-relative action prediction (not absolute), a 2x larger DiT (32 layers), and different script paths. Existing LeRobot v2.0 datasets are compatible.
+**Note**: The Seeed Studio wiki tutorial targets N1.5, but this project uses N1.6 (main branch). N1.6 uses state-relative action prediction (not absolute), a 2x larger DiT (32 layers), and different script paths.
 
 ## Repository Structure
 
@@ -19,79 +19,101 @@ Fine-tuning NVIDIA Isaac GR00T N1.6 (Vision-Language-Action model) for the LeRob
 │   ├── gr00t/          # Core library, training, eval scripts
 │   └── examples/SO100/ # SO-100 arm config (so100_config.py) and finetune script
 ├── SO-ARM100/          # git submodule → github.com/harry18456/SO-ARM100
-│   └── calibration/    # Follower + leader arm calibration JSONs (6 joints each)
 ├── CH341SER/           # git submodule → github.com/juliagoda/CH341SER (USB serial driver)
-├── datasets/           # Training data (to be created, not inside Isaac-GR00T/)
+├── scripts/            # All operational scripts (see below)
+├── datasets/           # Training data (gitignored, not inside Isaac-GR00T/)
+├── so101-checkpoints/  # Fine-tuned model checkpoints (gitignored, ~22GB each)
+├── camera_check/       # Camera angle reference images
 └── README.md           # Full setup and deployment guide (Traditional Chinese)
 ```
 
 ## Target Machine
 
-Jetson AGX Thor — Ubuntu 24.04.3, CUDA 13.0, Driver 580.00, Python 3.12.3, JetPack 7.1 (L4T 38.4), PyTorch 2.10.0.
+Jetson AGX Thor T5000 — Ubuntu 24.04.3, CUDA 13.0, Driver 580.00, Python 3.12.3, JetPack 7.1 (L4T 38.4), PyTorch 2.10.0, 128GB LPDDR5X, 2560 CUDA Cores, ~20 SM.
 
-## Key Commands
+## Scripts (Primary Interface)
 
-All commands below assume working directory is `Isaac-GR00T/`.
+Most operations use scripts from the project root directory.
 
-### Activate GR00T environment (required every new shell)
+**Standard boot sequence** (after each reboot):
+```bash
+bash scripts/post_boot.sh            # Load ch34x driver + fix /dev/ttyACM* perms (once per boot)
+source scripts/activate_env.sh       # Activate venv + Thor env (idempotent, each new shell)
+bash scripts/preflight_check.sh      # Verify driver, motors, cameras, ports
+```
+
+`activate_env.sh` is idempotent and can be safely sourced from both the user's shell and other scripts. Prefer it over manually `cd Isaac-GR00T && source .venv/bin/activate && source scripts/activate_thor.sh`.
+
+**Daily workflow:**
+```bash
+bash scripts/check_cameras.sh                    # Verify camera angles (saves to camera_check/)
+bash scripts/teleop_test.sh                      # Test leader→follower without recording
+bash scripts/record_data.sh [dataset_name]       # Record teleoperation data (default 50 episodes)
+python3 scripts/convert_v3_to_v2.py <in> <out>   # Convert LeRobot v3.0 → v2.1 for GR00T
+bash scripts/train.sh [dataset] [max_steps]      # Fine-tune GR00T (default: so101_pick_place_v2, 2000 steps)
+bash scripts/start_server.sh [checkpoint]        # Start inference server (accepts number: 2000)
+bash scripts/start_eval.sh [lang_instruction]    # Start eval client to control follower
+```
+
+**Server vs source**: use `bash scripts/start_server.sh` (not `source`) so the server runs in a subshell and Ctrl+C doesn't kill your current shell.
+
+**Calibration & repair:**
+```bash
+bash scripts/calibrate.sh [both|leader|follower]
+python3 scripts/fix_follower_wrist_offset.py      # Fix negative homing_offset PID runaway
+python3 scripts/diagnose_wrist_roll.py            # Read wrist_roll hardware registers
+python3 scripts/debug_teleop_wrist.py             # Single-axis wrist_roll teleop debug
+```
+
+## Key Commands (Manual)
+
+When not using scripts, working directory is `Isaac-GR00T/`:
 
 ```bash
+# Activate environment (required every new shell)
 source .venv/bin/activate
 source scripts/activate_thor.sh
-```
 
-### Quick validation (demo fine-tune, 5 steps)
-
-```bash
+# Quick validation (demo fine-tune, 5 steps)
 CUDA_VISIBLE_DEVICES=0 python gr00t/experiment/launch_finetune.py --base_model_path ./pretrained/GR00T-N1.6-3B --dataset_path ./demo_data/cube_to_bowl_5 --modality_config_path examples/SO100/so100_config.py --embodiment_tag NEW_EMBODIMENT --num_gpus 1 --output_dir /tmp/so100_finetune_test --max_steps 5 --save_steps 5 --global_batch_size 2 --dataloader_num_workers 2
-```
 
-### Fine-tune on Thor (N1.6)
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python gr00t/experiment/launch_finetune.py --base_model_path ./pretrained/GR00T-N1.6-3B --dataset_path ../datasets/<dataset-name>/ --modality_config_path examples/SO100/so100_config.py --embodiment_tag NEW_EMBODIMENT --num_gpus 1 --output_dir ./so101-checkpoints --max_steps 10000 --save_steps 1000 --learning_rate 1e-4 --global_batch_size 32 --warmup_ratio 0.05 --weight_decay 1e-5 --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 --dataloader_num_workers 4
-```
-
-### Run inference (two terminals, requires fine-tuned checkpoint)
-
-Terminal 1 — model server:
-```bash
-python gr00t/eval/run_gr00t_server.py --model_path ./so101-checkpoints/checkpoint-<N> --embodiment_tag NEW_EMBODIMENT
-```
-
-Terminal 2 — robot client:
-```bash
-python gr00t/eval/real_robot/SO100/eval_so100.py --robot.type=so101_follower --robot.port=/dev/ttyACM1 --robot.id=my_awesome_follower_arm --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" --policy_host=0.0.0.0 --lang_instruction="<task description>"
-```
-
-### Rebuild GR00T environment from scratch
-
-```bash
+# Rebuild environment from scratch
 bash scripts/deployment/thor/install_deps.sh
 ```
 
 ## Architecture Notes
 
+### GR00T N1.6 Model Architecture (3B params)
+
+```
+GR00T N1.6
+├── Backbone: Eagle3-VL 2B (frozen during fine-tune by default)
+│   ├── Vision: SigLIP-2 (image → visual tokens)
+│   └── Language: Qwen2 (task description → language tokens)
+└── Action Head: DiT 32-layer + encoders/decoders (1.09B, main training target)
+    └── Flow matching diffusion: noise → denoise → action trajectory
+```
+
+- Fine-tune trains the **DiT action head** + projectors. Backbone (SigLIP-2 + Qwen2) is frozen by default (`tune_llm=False`, `tune_visual=False`).
+- Action prediction is **state-relative** (N1.6), not absolute positions.
+- Action horizon: 16 steps. Max supported: 50.
+
 ### Embodiment Config Registration Flow (critical)
 
-This is the most important non-obvious architecture detail:
+1. **Pretrained model** (`processor_config.json`) does NOT contain `new_embodiment`.
+2. **During fine-tune**: `launch_finetune.py` imports `so100_config.py` → `register_modality_config()` → adds `new_embodiment` → saved into checkpoint's `processor_config.json`.
+3. **During inference**: `Gr00tPolicy` loads config from checkpoint. If using pretrained (not fine-tuned), `KeyError: 'new_embodiment'`.
 
-1. **Pretrained model** (`processor_config.json`) only contains NVIDIA's built-in embodiments: `behavior_r1_pro`, `gr1`, `robocasa_panda_omron`. It does NOT contain `new_embodiment`.
-2. **During fine-tune**: `launch_finetune.py` imports `so100_config.py` → calls `register_modality_config()` → adds `new_embodiment` to the global `MODALITY_CONFIGS` dict → processor is built with this config → `processor.save_pretrained()` writes it into the checkpoint's `processor_config.json`.
-3. **During inference**: `Gr00tPolicy.__init__` loads `processor_config.json` from the checkpoint and looks up `self.embodiment_tag.value` in it. If the checkpoint is pretrained (not fine-tuned), `KeyError: 'new_embodiment'` will occur.
-
-**Consequence**: Inference server MUST use a fine-tuned checkpoint, never the pretrained model, when using `--embodiment_tag NEW_EMBODIMENT`.
+**Consequence**: Inference server MUST use a fine-tuned checkpoint, never the pretrained model.
 
 ### Inference Server
 
-- `--modality_config_path` in `run_gr00t_server.py` is **only** used for `ReplayPolicy` (when `--dataset_path` is given). It is NOT passed to `Gr00tPolicy`. The modality config comes from the checkpoint's `processor_config.json` instead.
+- `--modality_config_path` in `run_gr00t_server.py` is only for `ReplayPolicy`. `Gr00tPolicy` gets config from the checkpoint's `processor_config.json`.
 - Server-client communicate via ZMQ on port 5555.
 
 ### lerobot Installation (critical — easy to break the environment)
 
-`eval_so100.py` requires `lerobot` (0.4.1) and `draccus`, but they are NOT in the GR00T pyproject.toml. They have their own pyproject.toml at `gr00t/eval/real_robot/SO100/pyproject.toml`.
-
-**NEVER install lerobot with dependencies** — `uv pip install lerobot` will pull PyTorch 2.7.1+cpu from PyPI, overwriting the Jetson-specific 2.10.0+CUDA. It also replaces the source-built torchcodec with a prebuilt version that lacks FFmpeg 7 support.
+**NEVER install lerobot with dependencies** — `uv pip install lerobot` will pull PyTorch 2.7.1+cpu from PyPI, overwriting the Jetson-specific 2.10.0+CUDA.
 
 Correct install:
 ```bash
@@ -102,23 +124,26 @@ uv pip install feetech-servo-sdk rerun-sdk
 uv pip install numpy==1.26.4  # rerun-sdk may upgrade numpy, pin it back
 ```
 
-If the environment is already broken, see README Section 9.1 for full recovery steps (uv sync → rebuild torchcodec from source → reinstall lerobot with --no-deps).
+If broken, see README Section 9.1 for full recovery.
 
-### Other Notes
+## Hardware Mapping
 
-- **N1.6 vs N1.5**: Fine-tune script is `gr00t/experiment/launch_finetune.py` (NOT `scripts/gr00t_finetune.py`). For N1.5, checkout `n1.5-release` branch.
-- **Two separate environments**: GR00T inference runs in `Isaac-GR00T/.venv` (Python 3.12). Data collection uses LeRobot on a separate PC (Python 3.10).
-- **Arm port mapping on Thor**: leader=`/dev/ttyACM0`, follower=`/dev/ttyACM1`. After reboot, run `sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1`. Port assignment may swap after USB re-plug; verify with `scripts/preflight_check.sh`.
-- **Camera mapping on Thor**: `video0` = wrist cam (pointing down at table), `video2` = front cam (viewing arm from front). Must be on different USB hub chips.
-- **Arm calibration on Thor**: Stored in `~/.cache/huggingface/lerobot/calibration/`. Calibration also exists in `SO-ARM100/calibration/` (from separate PC).
-- **Wrist roll (motor ID 5) critical**: STS3215 firmware has a PID runaway bug with negative `homing_offset`. After calibration, always verify `wrist_roll.homing_offset >= 0` in the calibration JSON. If negative, run `python3 scripts/fix_follower_wrist_offset.py`. See README 9.2 for full details.
-- **Submodules**: `Isaac-GR00T`, `SO-ARM100`, and `CH341SER` are git submodules. After cloning, run `git submodule update --init --recursive`.
-- **Dataset path**: Store training data in `./datasets/`, not inside `Isaac-GR00T/` (which is a submodule).
-- **Dataset format conversion**: lerobot 0.4.1 records v3.0 format, but GR00T fine-tune requires v2.1. Run `python3 scripts/convert_v3_to_v2.py <input> <output>` to convert. Key differences: v3.0 has one parquet/mp4 for all episodes; v2.1 needs per-episode files + `episodes.jsonl` + `tasks.jsonl` + `modality.json`.
-- **Recording args**: Use `--dataset.push_to_hub=false` (NOT `--dataset.local_files_only=true` which was removed in lerobot 0.4.1). Thor's X display is `:1` (not `:0`), set `DISPLAY=:1` for pynput keyboard control.
-- **Camera constraint**: Two USB cameras must be on different USB hub chips on Thor.
-- **NVPL dependency**: PyTorch on Thor requires `libnvpl-lapack0` and `libnvpl-blas0`. `install_deps.sh` handles this via the NVIDIA CUDA apt repo for `ubuntu2404/sbsa`.
-- **PEP 668**: Thor's Ubuntu 24.04 blocks `sudo pip3`. Use `uv tool install` for system-wide tools (e.g., `jetson-stats`).
-- **CH34x driver**: Must `make && sudo make load` in `CH341SER/` after each reboot (or add to `/etc/modules-load.d/`).
+- **Serial ports**: `/dev/ttyACM0` = leader, `/dev/ttyACM1` = follower. May swap after USB re-plug; verify with `scripts/preflight_check.sh`. After reboot: `sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1`.
+- **Cameras**: `video0` = wrist cam (pointing down at table), `video2` = front cam (viewing arm from front). Must be on different USB hub chips.
+- **Arm calibration**: `~/.cache/huggingface/lerobot/calibration/`.
+
+## Critical Pitfalls
+
+- **Wrist roll (motor ID 5)**: STS3215 firmware has a PID runaway bug with negative `homing_offset`. After calibration, verify `wrist_roll.homing_offset >= 0`. If negative, run `python3 scripts/fix_follower_wrist_offset.py`. See README 9.2.
+- **Dataset format**: lerobot 0.4.1 records v3.0 format, GR00T requires v2.1. Must run `convert_v3_to_v2.py`. Key differences: v3.0 has one parquet/mp4 for all episodes; v2.1 needs per-episode files + `episodes.jsonl` + `tasks.jsonl` + `modality.json`.
+- **Recording args**: Use `--dataset.push_to_hub=false` (NOT `--dataset.local_files_only=true` which was removed). Set `DISPLAY=:1` for pynput on Thor.
 - **N1.6 overfits faster**: Use `--color_jitter_params` and `--weight_decay` to regularize.
-- **torchcodec**: Must be built from source against system FFmpeg 7. The prebuilt wheel from PyPI/Jetson AI Lab doesn't work. `install_deps.sh` handles this.
+- **CH34x driver**: Must `make && sudo make load` in `CH341SER/` after each reboot.
+- **torchcodec**: Must be built from source against system FFmpeg 7. `install_deps.sh` handles this.
+- **N1.6 fine-tune script**: `gr00t/experiment/launch_finetune.py` (NOT `scripts/gr00t_finetune.py` which is N1.5).
+- **Submodules**: Run `git submodule update --init --recursive` after cloning.
+- **PEP 668**: Thor's Ubuntu 24.04 blocks `sudo pip3`. Use `uv tool install` for system-wide tools.
+- **lerobot default**: `--dataset.num_episodes` defaults to 50, recording stops automatically.
+- **Language instruction must match `tasks.jsonl` exactly**: N1.6 is highly sensitive to the language input. If `start_eval.sh` is run with a different task string than what's in `datasets/<name>/meta/tasks.jsonl`, the model will produce plausible-but-random motion. Always `cat tasks.jsonl` before eval.
+- **Camera indices must be consistent between `record_data.sh` and `start_eval.sh`**: Both must use the same `WRIST_CAM`/`FRONT_CAM` indices so training and inference feed images into the same channels. Mismatch causes visually-correct-looking motion that totally fails the task. Current convention: `wrist=0, front=2`.
+- **Bash scripts sourced vs executed**: scripts using `$(dirname "$0")` break when sourced (because `$0` is the shell name, not the script path). Use `${BASH_SOURCE[0]}` instead to make scripts work both ways.
