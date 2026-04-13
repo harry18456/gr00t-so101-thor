@@ -8,6 +8,28 @@
 
 ---
 
+## 訓練資料示範
+
+**攝影機擺位參考**（`scripts/check_cameras.sh` 產出的定格畫面）：
+
+| 前視角（front, video2）| 腕視角（wrist, video0）|
+|-----------------------|----------------------|
+| ![front camera](docs/training/camera_front.jpg) | ![wrist camera](docs/training/camera_wrist.jpg) |
+| 從正面拍攝手臂全身與工作區 | 固定在夾爪上方，往下看抓取目標 |
+
+以下是 teleoperation 收集的訓練資料片段（episode 000，任務：`pick up the ball and place it in the cup`）。人類透過 leader 手臂帶動 follower，雙攝影機同步記錄作為 GR00T 微調的視覺輸入：
+
+| 前視角（front, video2）| 腕視角（wrist, video0）|
+|-----------------------|----------------------|
+| https://github.com/harry18456/gr00t_for_lerobot_so_arm_and_deploy_on_jetson_thor/raw/main/docs/training/training_episode_000_front.mp4 | https://github.com/harry18456/gr00t_for_lerobot_so_arm_and_deploy_on_jetson_thor/raw/main/docs/training/training_episode_000_wrist.mp4 |
+
+- **總資料量**：50 episodes / 29,705 frames / 16.5 分鐘（詳見 [6.1 節](#61-使用內建腳本)）
+- **每 episode**：約 19.8 秒、594 frames、30 FPS
+- **同步資料**：每一 frame 都對應 parquet 中的 6 軸 follower 狀態 + leader 動作指令
+- 示範檔放在 `docs/training/`，從 `datasets/so101_pick_place_v2/videos/chunk-000/` 挑出 episode 000 複製而來。完整 50 集在本地 `datasets/` 目錄（已 gitignore）。
+
+---
+
 ## GR00T 模型簡介
 
 GR00T（**G**eneralist **R**obot **00** **T**echnology）是 NVIDIA 開發的 **Vision-Language-Action (VLA)** 基礎模型，專為通用機器人操控設計。核心概念是：**看圖 + 聽指令 + 感知狀態 → 輸出動作**。

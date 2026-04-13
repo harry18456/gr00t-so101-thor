@@ -15,6 +15,9 @@ datasets/
 # Model checkpoints (each ~22GB)
 so101-checkpoints/
 
+# Camera preview snapshots (reference copies live in docs/)
+camera_check/
+
 # CH341SER build artifacts
 CH341SER/*.ko
 CH341SER/*.o
