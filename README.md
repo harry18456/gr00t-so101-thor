@@ -21,7 +21,7 @@
 
 | 前視角（front, video2）| 腕視角（wrist, video0）|
 |-----------------------|----------------------|
-| https://github.com/harry18456/gr00t_for_lerobot_so_arm_and_deploy_on_jetson_thor/raw/main/docs/training/training_episode_000_front.mp4 | https://github.com/harry18456/gr00t_for_lerobot_so_arm_and_deploy_on_jetson_thor/raw/main/docs/training/training_episode_000_wrist.mp4 |
+| https://github.com/harry18456/gr00t-so101-thor/raw/main/docs/training/training_episode_000_front.mp4 | https://github.com/harry18456/gr00t-so101-thor/raw/main/docs/training/training_episode_000_wrist.mp4 |
 
 - **總資料量**：50 episodes / 29,705 frames / 16.5 分鐘（詳見 [6.1 節](#61-使用內建腳本)）
 - **每 episode**：約 19.8 秒、594 frames、30 FPS
